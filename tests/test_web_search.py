@@ -12,12 +12,15 @@ from inspect_ai.log import read_eval_log
 from inspect_ai.model import ChatMessageTool, ModelOutput, get_model
 from inspect_ai.solver import generate, use_tools
 from inspect_ai.tool import ContentText, ToolDef, ToolError, UrlCitation
+from inspect_ai.util._concurrency import init_concurrency
 
 from inspect_context_dev import web_search
 
 
 @pytest.fixture(params=["asyncio", "trio"])
 def anyio_backend(request: pytest.FixtureRequest) -> str:
+    # Match Inspect's test fixture: each backend needs fresh runtime semaphores.
+    init_concurrency()
     return str(request.param)
 
 
@@ -66,13 +69,17 @@ def response_body() -> dict[str, Any]:
     }
 
 
-def test_tool_schema_and_missing_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.anyio
+async def test_tool_schema_and_missing_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     definition = ToolDef(web_search())
     assert definition.name == "web_search"
     assert set(definition.parameters.properties) == {"query"}
     monkeypatch.delenv("CONTEXT_DEV_API_KEY")
+    search = web_search()
     with pytest.raises(RuntimeError, match="CONTEXT_DEV_API_KEY"):
-        web_search()
+        await search("test query")
 
 
 @pytest.mark.parametrize(
@@ -102,11 +109,13 @@ async def test_request_content_citations_and_cleanup(
         return httpx.Response(200, json=response_body())
 
     clients = install_transport(httpx.MockTransport(handler))
-    search = web_search(num_results=2, include_domains=["example.org"], max_connections=1)
+    search = web_search(
+        num_results=2, include_domains=["example.org"], max_connections=1
+    )
     result = await search("a&b=c#d")
     assert isinstance(result, list)
     assert result[0] == ContentText(
-        text="Source passage.",
+        text="Primary source\nhttps://example.org/primary\n\nSource passage.",
         citations=[
             UrlCitation(
                 title="Primary source",
@@ -136,13 +145,29 @@ async def test_request_content_citations_and_cleanup(
 async def test_empty_and_partial_results(
     install_transport: Callable[[httpx.AsyncBaseTransport], list[httpx.AsyncClient]],
 ) -> None:
-    install_transport(httpx.MockTransport(lambda _: httpx.Response(200, json={
-        "results": [], "partial": False,
-    })))
+    install_transport(
+        httpx.MockTransport(
+            lambda _: httpx.Response(
+                200,
+                json={
+                    "results": [],
+                    "partial": False,
+                },
+            )
+        )
+    )
     assert await web_search()("unknown query") == "No search results found."
-    install_transport(httpx.MockTransport(lambda _: httpx.Response(200, json={
-        "results": [], "partial": True,
-    })))
+    install_transport(
+        httpx.MockTransport(
+            lambda _: httpx.Response(
+                200,
+                json={
+                    "results": [],
+                    "partial": True,
+                },
+            )
+        )
+    )
     result = await web_search()("unknown query")
     assert isinstance(result, str)
     assert "partial" in result.lower()
@@ -152,9 +177,16 @@ async def test_empty_and_partial_results(
 async def test_untrusted_response_is_not_empty_success(
     install_transport: Callable[[httpx.AsyncBaseTransport], list[httpx.AsyncClient]],
 ) -> None:
-    install_transport(httpx.MockTransport(lambda _: httpx.Response(200, json={
-        "message": "upstream failure",
-    })))
+    install_transport(
+        httpx.MockTransport(
+            lambda _: httpx.Response(
+                200,
+                json={
+                    "message": "upstream failure",
+                },
+            )
+        )
+    )
     with pytest.raises(ValueError):
         await web_search()("test query")
 
@@ -245,7 +277,7 @@ async def test_output_bounds_and_empty_highlights(
     result = await web_search(num_results=2, max_characters=100)("test query")
     assert isinstance(result, list)
     assert isinstance(result[0], ContentText)
-    assert result[0].text == "A" * 100
+    assert result[0].text.endswith("\n\n" + "A" * 100)
     assert isinstance(result[1], ContentText)
     assert "Search description" in result[1].text
     assert "Search-only information." in result[1].text
@@ -264,6 +296,7 @@ class BlockingTransport(httpx.AsyncBaseTransport):
         self.started.set()
         try:
             await anyio.sleep_forever()
+            raise AssertionError("The blocking request should be canceled")
         finally:
             self.active -= 1
 
@@ -278,10 +311,18 @@ async def test_cancellation_and_concurrency_cleanup(
     transport = BlockingTransport()
     clients = install_transport(transport)
     search = web_search(max_connections=1)
+    second_started = anyio.Event()
+
+    async def second_search() -> None:
+        second_started.set()
+        await search("second query")
+
     async with anyio.create_task_group() as tasks:
         tasks.start_soon(search, "first query")
         await transport.started.wait()
-        tasks.start_soon(search, "second query")
+        tasks.start_soon(second_search)
+        await second_started.wait()
+        assert transport.active == 1
         tasks.cancel_scope.cancel()
     assert transport.peak == 1
     assert transport.active == 0
@@ -305,11 +346,20 @@ def test_eval_log_round_trip(
     install_transport: Callable[[httpx.AsyncBaseTransport], list[httpx.AsyncClient]],
     tmp_path: Path,
 ) -> None:
-    install_transport(httpx.MockTransport(lambda _: httpx.Response(200, json=response_body())))
-    model = get_model("mockllm/model", custom_outputs=[
-        ModelOutput.for_tool_call("mockllm/model", "web_search", {"query": "test query"}),
-        ModelOutput.from_content("mockllm/model", "Found the cited primary source."),
-    ])
+    install_transport(
+        httpx.MockTransport(lambda _: httpx.Response(200, json=response_body()))
+    )
+    model = get_model(
+        "mockllm/model",
+        custom_outputs=[
+            ModelOutput.for_tool_call(
+                "mockllm/model", "web_search", {"query": "test query"}
+            ),
+            ModelOutput.from_content(
+                "mockllm/model", "Found the cited primary source."
+            ),
+        ],
+    )
     task = Task(
         dataset=[Sample(input="Find a source.")],
         solver=[use_tools(web_search()), generate()],
@@ -320,11 +370,27 @@ def test_eval_log_round_trip(
     restored = read_eval_log(log.location)
     assert restored.plan is not None
     assert restored.samples is not None
-    tools = [message for message in restored.samples[0].messages if isinstance(message, ChatMessageTool)]
+    tools = [
+        message
+        for message in restored.samples[0].messages
+        if isinstance(message, ChatMessageTool)
+    ]
     assert len(tools) == 1
     assert tools[0].error is None
     assert "Source passage." in tools[0].text
+    assert "https://example.org/primary" in tools[0].text
+    assert isinstance(tools[0].content, list)
+    primary, fallback = tools[0].content
+    assert isinstance(primary, ContentText)
+    assert primary.citations
+    assert primary.citations[0].type == "url"
+    assert primary.citations[0].url == "https://example.org/primary"
+    assert primary.citations[0].cited_text == "Source passage."
+    assert isinstance(fallback, ContentText)
+    assert fallback.citations
+    assert fallback.citations[0].type == "url"
+    assert fallback.citations[0].url == "https://example.org/unread"
+    assert fallback.citations[0].cited_text is None
     assert "inspect_context_dev/web_search" in json.dumps(
         restored.plan.model_dump(mode="json")
     )
-

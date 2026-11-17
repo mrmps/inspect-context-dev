@@ -18,22 +18,36 @@ from inspect_context_dev import web_search
     not os.environ.get("CONTEXT_DEV_API_KEY"), reason="CONTEXT_DEV_API_KEY is not set"
 )
 def test_live_eval_and_saved_citations(tmp_path: Path) -> None:
-    model = get_model("mockllm/model", custom_outputs=[
-        ModelOutput.for_tool_call("mockllm/model", "web_search", {
-            "query": "Inspect AI web search tools",
-        }),
-        ModelOutput.from_content("mockllm/model", "Search completed."),
-    ])
+    model = get_model(
+        "mockllm/model",
+        custom_outputs=[
+            ModelOutput.for_tool_call(
+                "mockllm/model",
+                "web_search",
+                {
+                    "query": "Inspect AI web search tools",
+                },
+            ),
+            ModelOutput.from_content("mockllm/model", "Search completed."),
+        ],
+    )
     task = Task(
         dataset=[Sample(input="Find Inspect's web search documentation.")],
-        solver=[use_tools(web_search(num_results=1, include_domains=["inspect.aisi.org.uk"])), generate()],
+        solver=[
+            use_tools(
+                web_search(num_results=1, include_domains=["inspect.aisi.org.uk"])
+            ),
+            generate(),
+        ],
     )
     log = eval(task, model=model, log_dir=str(tmp_path), display="none")[0]
     assert log.status == "success"
     assert log.location is not None
     restored = read_eval_log(log.location)
     assert restored.samples
-    tool_messages = [m for m in restored.samples[0].messages if isinstance(m, ChatMessageTool)]
+    tool_messages = [
+        m for m in restored.samples[0].messages if isinstance(m, ChatMessageTool)
+    ]
     assert len(tool_messages) == 1
     assert tool_messages[0].error is None
     content = tool_messages[0].content

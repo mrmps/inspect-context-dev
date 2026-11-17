@@ -11,7 +11,6 @@ from tenacity import (
     AsyncRetrying,
     retry_if_exception,
     stop_after_attempt,
-    stop_after_delay,
     wait_exponential_jitter,
 )
 
@@ -61,25 +60,29 @@ def web_search(
 
     Args:
         num_results: Maximum results to return, from 1 to 100.
-        max_characters: Maximum passage or description characters per result.
+        max_characters: Maximum passage or description characters per result,
+            from 100 to 20000.
         include_domains: Restrict results to these domains (up to 100).
         exclude_domains: Exclude these domains (up to 100).
         freshness: Restrict results by publication recency.
         max_connections: Maximum concurrent Context.dev searches.
         timeout: Total execution deadline in seconds, including retries and
-            waiting for a concurrency slot. Each HTTP attempt has a timeout
-            of at most 30 seconds.
+            waiting for a concurrency slot. Each HTTP connect, read, write,
+            and pool phase is limited to at most 30 seconds. Client cleanup
+            may take up to 5 additional seconds.
 
     Returns:
         An Inspect tool accepting a search query. Successful page reads return
         cited highlights; unavailable highlights are labeled with their status
         and return the search description instead. HTTP and invalid-response
         errors fail the sample rather than being presented as empty results.
+        Deadline expiry becomes Inspect's timeout tool error, allowing the
+        model to continue the sample.
     """
     if not 1 <= num_results <= 100:
         raise ValueError("num_results must be between 1 and 100")
-    if max_characters < 1:
-        raise ValueError("max_characters must be positive")
+    if not 100 <= max_characters <= 20000:
+        raise ValueError("max_characters must be between 100 and 20000")
     if max_connections < 1:
         raise ValueError("max_connections must be positive")
     if not math.isfinite(timeout) or timeout <= 0:
@@ -119,7 +122,7 @@ def web_search(
                 try:
                     async for attempt in AsyncRetrying(
                         wait=wait_exponential_jitter(),
-                        stop=stop_after_attempt(5) | stop_after_delay(timeout),
+                        stop=stop_after_attempt(5),
                         retry=retry_if_exception(_should_retry),
                         reraise=True,
                     ):
@@ -132,7 +135,7 @@ def web_search(
                             response.raise_for_status()
                     search = _Response.model_validate(response.json())
                 finally:
-                    with anyio.CancelScope(shield=True):
+                    with anyio.move_on_after(5, shield=True):
                         await client.aclose()
 
         if not search.results:

@@ -53,12 +53,15 @@ tool:
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `num_results` | `10` | Maximum results, from 1 to 100. Fewer may be returned. |
-| `max_characters` | `2000` | Passage or description characters per result. |
+| `max_characters` | `2000` | Passage or description characters per result, from 100 to 20000. |
 | `include_domains` | `None` | Restrict results to these domains, up to 100. |
 | `exclude_domains` | `None` | Exclude these domains, up to 100. |
 | `freshness` | `None` | `last_24_hours`, `last_week`, `last_month`, or `last_year`. |
 | `max_connections` | `10` | Concurrent searches across an Inspect evaluation. |
-| `timeout` | `60` | Total seconds, including concurrency waits and retries. |
+| `timeout` | `60` | Deadline in seconds, including concurrency waits and retries; cleanup may take up to 5 more seconds. |
+
+Search instances share Inspect's named concurrency limit. Within an evaluation,
+the first search call's `max_connections` sets that shared limit.
 
 Each result is a `ContentText` block with a `UrlCitation` preserving the source
 URL, title, and returned passage. Successful highlights contain page passages.
@@ -74,9 +77,12 @@ empty search results.
 Searches retry connection failures, HTTP 408, 429, and 5xx responses up to five
 attempts within the total deadline. Authentication, permission, billing, and
 other 4xx errors are not retried. Unresolved HTTP failures fail the evaluation
-sample; invalid queries are reported to the model as a `ToolError`. There is no
-fallback to another search service. Each call closes its HTTP client, including
-when canceled. The API key is sent in an Authorization header.
+sample; invalid queries are reported to the model as a `ToolError`. Expiry of
+the overall deadline becomes Inspect's `timeout` tool error, allowing the model
+to continue the sample. Each HTTP connect, read, write, and pool phase is limited
+to at most 30 seconds. Client cleanup is shielded from cancellation for up to
+5 additional seconds. There is no fallback to another search service. The API
+key is sent in an Authorization header.
 
 This is not a Google CSE compatibility layer: Google-specific pagination,
 ranking, image search, or engine configuration are not emulated. See the

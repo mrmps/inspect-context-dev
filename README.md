@@ -10,13 +10,15 @@ not replace or change the built-in `inspect_ai.tool.web_search` providers.
 Requires Python 3.11+ and Inspect AI 0.3.290+.
 
 ```sh
-uv pip install .
+uv pip install 'git+https://github.com/mrmps/inspect-context-dev.git'
 export CONTEXT_DEV_API_KEY="your-api-key"
 ```
 
 Get an API key from [Context.dev](https://context.dev/signup). Searches consume
 Context.dev credits, including additional credits for returned highlights; see
 [current pricing](https://docs.context.dev/account/credits).
+
+For development, clone this repository and use `uv sync --locked`.
 
 ## Use in an evaluation
 

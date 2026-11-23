@@ -159,7 +159,7 @@ def web_search(
                 passage = (result.description or "")[:max_characters]
                 cited_text = None
                 reason = (
-                    highlights.code
+                    "page unavailable"
                     if highlights.code != "SUCCESS"
                     else "no passages returned"
                 )

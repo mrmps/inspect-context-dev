@@ -99,14 +99,20 @@ def test_invalid_configuration(options: dict[str, Any]) -> None:
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    "fallback_status", ["WEBSITE_ACCESS_ERROR", "synthetic-credential-quote'escaped\\n"]
+)
 async def test_request_content_citations_and_cleanup(
+    fallback_status: str,
     install_transport: Callable[[httpx.AsyncBaseTransport], list[httpx.AsyncClient]],
 ) -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        return httpx.Response(200, json=response_body())
+        response = response_body()
+        response["results"][1]["highlights"]["code"] = fallback_status
+        return httpx.Response(200, json=response)
 
     clients = install_transport(httpx.MockTransport(handler))
     search = web_search(
@@ -126,7 +132,8 @@ async def test_request_content_citations_and_cleanup(
     )
     assert isinstance(result[1], ContentText)
     assert "Search-only information." in result[1].text
-    assert "WEBSITE_ACCESS_ERROR" in result[1].text
+    assert fallback_status not in result[1].text
+    assert "highlights unavailable: page unavailable" in result[1].text
     assert "Search description" in result[1].text
     request = requests[0]
     assert str(request.url) == "https://api.context.dev/v1/web/search"
